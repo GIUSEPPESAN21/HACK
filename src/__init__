@@ -1,0 +1,11 @@
+"""
+Alerta Verde — Paquete principal.
+
+Módulos:
+    - config: Constantes de aplicación (rutas, colecciones, límites).
+    - validation: Normalización de lecturas de sensores.
+    - data_processing: Carga, limpieza y feature engineering del dataset de sensores.
+    - ml_model: Entrenamiento, evaluación y predicción con RandomForest.
+    - firebase_client: Conexión y operaciones CRUD con Firestore.
+    - chatbot_logic: Lógica del Asistente Solar con Google Gemini.
+"""
