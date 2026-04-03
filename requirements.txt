@@ -1,0 +1,9 @@
+streamlit==1.45.1
+pandas==2.2.3
+numpy==1.26.4
+scikit-learn==1.6.1
+firebase-admin==6.6.0
+google-generativeai==0.8.5
+joblib==1.4.2
+plotly==6.0.1
+python-dateutil==2.9.0
