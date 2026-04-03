@@ -1,40 +1,191 @@
 import streamlit as st
+import pandas as pd
 import plotly.express as px
-from src.data_processing import load_and_process_data
+import plotly.graph_objects as go
+import os
 
-st.set_page_config(page_title="Dashboard | Hackathon", page_icon="📊", layout="wide")
+# 1. Configuración de página
+st.set_page_config(
+    page_title="Dashboard Solar | SAVA",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.title("📊 Dashboard de Monitoreo Solar")
+# 2. Inyección de CSS para tarjetas y métricas
+def inject_dashboard_css():
+    st.markdown("""
+        <style>
+        /* Estilos generales */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+        html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+        
+        /* Tarjetas de Métricas (KPIs) */
+        div[data-testid="metric-container"] {
+            background-color: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 1.25rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        div[data-testid="metric-container"]:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+        
+        /* Contenedores de Gráficos */
+        .chart-container {
+            background-color: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 1rem;
+            margin-top: 1rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+        }
+        
+        /* Alerta de Estado Superior */
+        .status-banner {
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            font-weight: 500;
+        }
+        .status-ok { background-color: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+        .status-warning { background-color: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+        </style>
+    """, unsafe_allow_html=True)
 
-# 1. Carga de datos ultra-rápida gracias a @st.cache_data
-# La primera vez tardará, las siguientes será instantáneo.
-df = load_and_process_data()
+inject_dashboard_css()
 
-if not df.empty:
-    st.write(f"**Registros analizados:** {len(df):,}")
+# 3. Carga y Procesamiento de Datos
+@st.cache_data
+def load_data():
+    """Carga los datos del CSV. Se usa caché para mejorar el rendimiento."""
+    # Buscar el archivo en la ruta actual o en el directorio superior
+    file_path = "01_Alerta Verde.csv"
+    if not os.path.exists(file_path):
+        file_path = "../01_Alerta Verde.csv" # Intento alternativo
+        
+    try:
+        df = pd.read_csv(file_path)
+        # Asegurar que la fecha sea tipo datetime
+        df['Fecha'] = pd.to_datetime(df['Fecha'])
+        return df
+    except Exception as e:
+        st.error(f"Error cargando los datos: {e}")
+        return pd.DataFrame()
+
+df = load_data()
+
+# 4. Encabezado del Dashboard
+st.markdown("## 📊 Panel de Monitoreo General")
+st.caption("Visualización en tiempo real del estado de los sensores solares")
+
+if df.empty:
+    st.warning("No se encontraron datos para mostrar. Por favor, verifica el archivo '01_Alerta Verde.csv'.")
+    st.stop()
+
+# 5. Filtros Globales (Barra Lateral)
+with st.sidebar:
+    st.markdown("### ⚙️ Filtros de Visualización")
+    sensores_disponibles = ["Todos"] + list(df['Sensor_ID'].unique())
+    sensor_seleccionado = st.selectbox("Seleccionar Sensor", sensores_disponibles)
     
-    # 2. Métricas rápidas
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Temperatura Promedio", f"{df['Temperatura_C'].mean():.1f} °C")
-    col2.metric("Humedad Promedio", f"{df['Humedad_%'].mean():.1f} %")
-    col3.metric("Total Anomalías Históricas", f"{df['Anomalia'].sum():,}")
+    fecha_min = df['Fecha'].min().date()
+    fecha_max = df['Fecha'].min().date()
+    # Usar st.date_input para el rango
+    fechas = st.date_input("Rango de Fechas", [fecha_min, fecha_max])
 
-    st.markdown("---")
+# Aplicar filtros
+df_filtrado = df.copy()
+if sensor_seleccionado != "Todos":
+    df_filtrado = df_filtrado[df_filtrado['Sensor_ID'] == sensor_seleccionado]
 
-    # 3. Gráficas optimizadas (usamos un sample si es muy grande para no trabar el navegador)
-    st.subheader("Tendencia de Temperatura vs Humedad")
-    
-    # Tomamos una muestra de 2000 datos para graficar rápido sin colapsar el frontend
-    df_sample = df.sample(n=2000, random_state=42) if len(df) > 2000 else df
-    
-    fig = px.scatter(
-        df_sample, 
-        x="Temperatura_C", 
-        y="Humedad_%", 
-        color="Anomalia",
-        color_continuous_scale="Reds",
-        title="Mapeo de Anomalías (Muestra representativa)"
-    )
-    st.plotly_chart(fig, use_container_width=True)
+if len(fechas) == 2:
+    start_date, end_date = fechas
+    # Convertir a datetime64 para comparar con pandas
+    start_date = pd.to_datetime(start_date)
+    end_date = pd.to_datetime(end_date)
+    df_filtrado = df_filtrado[(df_filtrado['Fecha'] >= start_date) & (df_filtrado['Fecha'] <= end_date)]
+
+# 6. Lógica de Alerta Superior (Banner)
+anomalias_recientes = df_filtrado[df_filtrado['Anomalia'] == 1].shape[0]
+
+if anomalias_recientes == 0:
+    st.markdown('<div class="status-banner status-ok">✅ El sistema opera con normalidad. No se detectan anomalías recientes.</div>', unsafe_allow_html=True)
 else:
-    st.warning("No se pudieron cargar los datos. Verifica el archivo CSV.")
+    st.markdown(f'<div class="status-banner status-warning">⚠️ Atención: Se han registrado {anomalias_recientes} anomalía(s) en el rango seleccionado.</div>', unsafe_allow_html=True)
+
+# 7. Métricas Clave (KPIs)
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    temp_promedio = df_filtrado['Temperatura_C'].mean()
+    st.metric(label="Temperatura Promedio", value=f"{temp_promedio:.1f} °C", delta="-0.2 °C")
+
+with col2:
+    hum_promedio = df_filtrado['Humedad_%'].mean()
+    st.metric(label="Humedad Promedio", value=f"{hum_promedio:.1f} %", delta="1.5 %", delta_color="inverse")
+
+with col3:
+    total_registros = len(df_filtrado)
+    st.metric(label="Total Lecturas", value=f"{total_registros}")
+
+with col4:
+    tasa_anomalia = (anomalias_recientes / total_registros) * 100 if total_registros > 0 else 0
+    st.metric(label="Tasa de Anomalías", value=f"{tasa_anomalia:.1f} %")
+
+st.markdown("---")
+
+# 8. Gráficos Interactivos
+st.markdown("### 📈 Análisis de Tendencias")
+
+col_chart1, col_chart2 = st.columns(2)
+
+with col_chart1:
+    st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+    st.markdown("**Temperatura a lo largo del tiempo**")
+    # Gráfico de líneas para temperatura
+    fig_temp = px.line(
+        df_filtrado, 
+        x='Fecha', 
+        y='Temperatura_C', 
+        color='Sensor_ID',
+        color_discrete_sequence=px.colors.qualitative.Pastel
+    )
+    fig_temp.update_layout(margin=dict(l=20, r=20, t=20, b=20), xaxis_title="", yaxis_title="Temperatura (°C)")
+    st.plotly_chart(fig_temp, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with col_chart2:
+    st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+    st.markdown("**Distribución de Anomalías por Sensor**")
+    # Gráfico de barras apiladas o diagrama de dispersión
+    df_anomalias = df_filtrado.groupby(['Sensor_ID', 'Anomalia']).size().reset_index(name='Cuenta')
+    # Convertir a string para mejor visualización categórica
+    df_anomalias['Estado'] = df_anomalias['Anomalia'].map({0: 'Normal', 1: 'Anomalía'})
+    
+    fig_anom = px.bar(
+        df_anomalias, 
+        x='Sensor_ID', 
+        y='Cuenta', 
+        color='Estado',
+        color_discrete_map={'Normal': '#10b981', 'Anomalía': '#ef4444'},
+        barmode='group'
+    )
+    fig_anom.update_layout(margin=dict(l=20, r=20, t=20, b=20), xaxis_title="ID del Sensor", yaxis_title="Cantidad de Lecturas")
+    st.plotly_chart(fig_anom, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# 9. Tabla de Datos Raw
+st.markdown("### 📋 Registro Detallado de Sensores")
+with st.expander("Ver tabla de datos completa"):
+    st.dataframe(
+        df_filtrado.style.applymap(
+            lambda val: 'background-color: #fee2e2; color: #991b1b' if val == 1 else '', subset=['Anomalia']
+        ),
+        use_container_width=True
+    )
