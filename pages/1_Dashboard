@@ -1,0 +1,354 @@
+"""
+📊 Dashboard — Visualización de sensores y KPIs (Firebase o CSV demo).
+"""
+
+from __future__ import annotations
+
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+from src.data_processing import (
+    add_features,
+    clean_data,
+    dataframe_from_firebase_records,
+    default_csv_path,
+    generate_demo_data,
+    load_csv,
+)
+from src.firebase_client import get_last_firebase_error, get_sensor_history_paginated, is_firebase_available
+
+st.set_page_config(
+    page_title="📊 Dashboard — Alerta Verde",
+    page_icon="📊",
+    layout="wide",
+)
+
+st.markdown("""
+<style>
+    .dashboard-header {
+        background: linear-gradient(135deg, #1B5E20 0%, #388E3C 50%, #43A047 100%);
+        border-radius: 16px;
+        padding: 2rem;
+        color: white;
+        margin-bottom: 1.5rem;
+    }
+    .metric-card {
+        background: white;
+        border-radius: 14px;
+        padding: 1.2rem 1rem;
+        text-align: center;
+        box-shadow: 0 3px 15px rgba(0,0,0,0.06);
+        border-top: 4px solid #43A047;
+    }
+    .metric-value { font-size: 1.8rem; font-weight: 800; color: #1B5E20; }
+    .metric-label { font-size: 0.8rem; color: #757575; text-transform: uppercase; }
+    .section-title {
+        font-size: 1.4rem;
+        font-weight: 700;
+        color: #1B5E20;
+        margin: 1.5rem 0 0.8rem;
+        border-left: 4px solid #43A047;
+        padding-left: 12px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+@st.cache_data(ttl=120)
+def load_dashboard_dataframe(uploaded_file: object | None, use_firebase: bool) -> pd.DataFrame:
+    """Construye el DataFrame del dashboard desde CSV, archivo subido o Firebase.
+
+    Args:
+        uploaded_file: Archivo CSV opcional del usuario.
+        use_firebase: Si True, intenta mezclar lecturas recientes de Firestore.
+
+    Returns:
+        DataFrame con columnas derivadas listas para gráficos.
+    """
+    if uploaded_file is not None:
+        df_raw = load_csv(uploaded_file)
+    else:
+        try:
+            df_raw = load_csv(default_csv_path())
+        except (FileNotFoundError, ValueError, OSError):
+            df_raw = generate_demo_data(n_rows=5000)
+
+    fb_rows: list[dict] = []
+    if use_firebase and is_firebase_available():
+        fb_rows, _ = get_sensor_history_paginated(sensor_id=None, page_size=400, cursor_id=None)
+
+    if fb_rows:
+        fb_df = dataframe_from_firebase_records(fb_rows)
+        df_raw = pd.concat([df_raw, fb_df], ignore_index=True)
+
+    df_clean = clean_data(df_raw)
+    return add_features(df_clean)
+
+
+with st.sidebar:
+    st.markdown("## 📊 Dashboard")
+    st.markdown("---")
+    uploaded = st.file_uploader(
+        "📁 Cargar CSV de sensores",
+        type=["csv"],
+        help="Columnas: Fecha, Sensor_ID, Temperatura_C, Humedad_%, Anomalia, Usuario",
+    )
+    use_fb = st.toggle(
+        "Incluir lecturas recientes de Firebase",
+        value=is_firebase_available(),
+        disabled=not is_firebase_available(),
+        help="Requiere secrets de Firebase configurados en Streamlit Cloud.",
+    )
+    if use_fb and not is_firebase_available():
+        st.info("Firebase no está disponible; se usan solo datos locales/demo.")
+
+    df = load_dashboard_dataframe(uploaded, use_fb)
+
+    sensores_disponibles = sorted(df["Sensor_ID"].unique().tolist())
+    sensores_seleccionados = st.multiselect(
+        "Sensores",
+        options=sensores_disponibles,
+        default=sensores_disponibles,
+    )
+
+    fecha_min = df["Fecha"].min().date()
+    fecha_max = df["Fecha"].max().date()
+    rango_fechas = st.date_input(
+        "Rango de fechas",
+        value=(fecha_min, fecha_max),
+        min_value=fecha_min,
+        max_value=fecha_max,
+    )
+
+    estado_filtro = st.selectbox(
+        "Estado",
+        options=["Todos", "Solo normales", "Solo anomalías"],
+        index=0,
+    )
+
+    mostrar_solo_anomalias = estado_filtro == "Solo anomalías"
+    mostrar_solo_normales = estado_filtro == "Solo normales"
+
+if get_last_firebase_error():
+    st.warning(f"Último aviso Firebase: {get_last_firebase_error()}")
+
+st.markdown("""
+<div class="dashboard-header">
+    <h1 style="margin:0;">📊 Dashboard de Monitoreo Solar</h1>
+    <p style="margin:0.4rem 0 0; opacity:0.9;">KPIs y tendencias de temperatura, humedad y anomalías</p>
+</div>
+""", unsafe_allow_html=True)
+
+df_filtered = df[df["Sensor_ID"].isin(sensores_seleccionados)].copy()
+
+if isinstance(rango_fechas, tuple) and len(rango_fechas) == 2:
+    df_filtered = df_filtered[
+        (df_filtered["Fecha"].dt.date >= rango_fechas[0])
+        & (df_filtered["Fecha"].dt.date <= rango_fechas[1])
+    ]
+
+if mostrar_solo_anomalias:
+    df_filtered = df_filtered[df_filtered["Anomalia"] == 1]
+elif mostrar_solo_normales:
+    df_filtered = df_filtered[df_filtered["Anomalia"] == 0]
+
+total_registros = len(df_filtered)
+total_anomalias = int(df_filtered["Anomalia"].sum()) if total_registros else 0
+tasa_anomalia = (total_anomalias / total_registros * 100) if total_registros else 0.0
+temp_media = float(df_filtered["Temperatura_C"].mean()) if total_registros else 0.0
+humedad_media = float(df_filtered["Humedad_%"].mean()) if total_registros else 0.0
+
+fallos_por_sensor = (
+    df_filtered.groupby("Sensor_ID")["Anomalia"].sum().sort_values(ascending=False)
+    if total_registros
+    else pd.Series(dtype=float)
+)
+sensor_mas_fallos = str(fallos_por_sensor.index[0]) if len(fallos_por_sensor) else "—"
+ultima_lectura = df_filtered["Fecha"].max() if total_registros else None
+
+c1, c2, c3, c4, c5, c6 = st.columns(6)
+
+with c1:
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-value">{total_registros:,}</div>
+        <div class="metric-label">Registros</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with c2:
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-value">{tasa_anomalia:.1f}%</div>
+        <div class="metric-label">% anomalías</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with c3:
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-value">{sensor_mas_fallos}</div>
+        <div class="metric-label">Sensor más fallos</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with c4:
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-value">{ultima_lectura or '—'}</div>
+        <div class="metric-label">Última lectura</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with c5:
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-value">{temp_media:.1f}°C</div>
+        <div class="metric-label">Temp. media</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with c6:
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-value">{humedad_media:.1f}%</div>
+        <div class="metric-label">Humedad media</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+if total_registros == 0:
+    st.warning("No hay datos para los filtros seleccionados.")
+    st.stop()
+
+st.markdown('<div class="section-title">🌡️ Temperatura y humedad en el tiempo</div>', unsafe_allow_html=True)
+
+fig_time = make_subplots(
+    rows=2,
+    cols=1,
+    shared_xaxes=True,
+    vertical_spacing=0.08,
+    subplot_titles=("Temperatura (°C)", "Humedad (%)"),
+)
+
+palette = px.colors.qualitative.Set2
+for i, sensor in enumerate(sensores_seleccionados[:12]):
+    part = df_filtered[df_filtered["Sensor_ID"] == sensor]
+    color = palette[i % len(palette)]
+    fig_time.add_trace(
+        go.Scatter(
+            x=part["Fecha"],
+            y=part["Temperatura_C"],
+            mode="lines",
+            name=sensor,
+            line=dict(width=1.4, color=color),
+            opacity=0.85,
+        ),
+        row=1,
+        col=1,
+    )
+    fig_time.add_trace(
+        go.Scatter(
+            x=part["Fecha"],
+            y=part["Humedad_%"],
+            mode="lines",
+            name=sensor,
+            line=dict(width=1.4, color=color),
+            opacity=0.85,
+            showlegend=False,
+        ),
+        row=2,
+        col=1,
+    )
+
+fig_time.update_layout(height=560, template="plotly_white", margin=dict(l=50, r=20, t=40, b=40))
+fig_time.update_yaxes(title_text="°C", row=1, col=1)
+fig_time.update_yaxes(title_text="%", row=2, col=1)
+st.plotly_chart(fig_time, use_container_width=True)
+
+g1, g2 = st.columns(2)
+
+with g1:
+    st.markdown('<div class="section-title">🔴 Anomalías por sensor</div>', unsafe_allow_html=True)
+    ap = df_filtered.groupby("Sensor_ID")["Anomalia"].sum().reset_index().sort_values("Anomalia", ascending=True)
+    fig_bar = px.bar(
+        ap,
+        x="Anomalia",
+        y="Sensor_ID",
+        orientation="h",
+        color="Anomalia",
+        color_continuous_scale=["#C8E6C9", "#FF9800", "#C62828"],
+    )
+    fig_bar.update_layout(height=420, template="plotly_white", showlegend=False, coloraxis_showscale=False)
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+with g2:
+    st.markdown('<div class="section-title">📊 Normal vs anomalía</div>', unsafe_allow_html=True)
+    dist = df_filtered["Anomalia"].value_counts().reset_index()
+    dist.columns = ["Estado", "Cantidad"]
+    dist["Estado"] = dist["Estado"].map({0: "Normal", 1: "Anomalía"})
+    fig_pie = px.pie(
+        dist,
+        values="Cantidad",
+        names="Estado",
+        color="Estado",
+        color_discrete_map={"Normal": "#43A047", "Anomalía": "#E53935"},
+        hole=0.45,
+    )
+    fig_pie.update_layout(height=420, template="plotly_white")
+    st.plotly_chart(fig_pie, use_container_width=True)
+
+st.markdown('<div class="section-title">🗓️ Mapa de calor — anomalías por hora y día</div>', unsafe_allow_html=True)
+
+heat = (
+    df_filtered[df_filtered["Anomalia"] == 1]
+    .groupby(["Dia_semana", "Hora"])
+    .size()
+    .reset_index(name="count")
+)
+
+if not heat.empty:
+    pivot = heat.pivot_table(index="Dia_semana", columns="Hora", values="count", fill_value=0)
+    dias = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+    fig_h = px.imshow(
+        pivot.values,
+        labels=dict(x="Hora", y="Día", color="Anomalías"),
+        x=[f"{h}" for h in pivot.columns],
+        y=[dias[int(i)] if int(i) < 7 else str(int(i)) for i in pivot.index],
+        color_continuous_scale="YlOrRd",
+        aspect="auto",
+    )
+    fig_h.update_layout(height=360, template="plotly_white")
+    st.plotly_chart(fig_h, use_container_width=True)
+else:
+    st.info("No hay anomalías en el rango filtrado.")
+
+st.markdown('<div class="section-title">🔬 Temperatura vs humedad</div>', unsafe_allow_html=True)
+
+df_filtered["Estado"] = df_filtered["Anomalia"].map({0: "Normal", 1: "Anomalía"})
+sample_n = min(2500, len(df_filtered))
+fig_s = px.scatter(
+    df_filtered.sample(sample_n, random_state=7),
+    x="Temperatura_C",
+    y="Humedad_%",
+    color="Estado",
+    color_discrete_map={"Normal": "#43A047", "Anomalía": "#E53935"},
+    opacity=0.55,
+    hover_data=["Sensor_ID", "Fecha"],
+)
+fig_s.update_layout(height=460, template="plotly_white")
+st.plotly_chart(fig_s, use_container_width=True)
+
+st.markdown('<div class="section-title">📋 Tabla</div>', unsafe_allow_html=True)
+cols = ["Fecha", "Sensor_ID", "Temperatura_C", "Humedad_%", "Anomalia", "Usuario"]
+st.dataframe(df_filtered[cols].sort_values("Fecha", ascending=False).head(500), use_container_width=True, height=380)
+
+csv_bytes = df_filtered[cols].to_csv(index=False).encode("utf-8")
+st.download_button(
+    "⬇️ Descargar CSV filtrado",
+    data=csv_bytes,
+    file_name="alerta_verde_dashboard.csv",
+    mime="text/csv",
+)
