@@ -24,7 +24,7 @@ TRAIN_TEST_SPLIT: float = 0.2
 TRAIN_RANDOM_STATE: int = 42
 
 # --- Gemini ---
-GEMINI_MODEL_NAME: str = "gemini-1.5-flash"
+GEMINI_MODEL_NAME: str = "gemini-flash-latest"
 
 # --- Firestore ---
 COLLECTION_LECTURAS: str = "lecturas_sensores"

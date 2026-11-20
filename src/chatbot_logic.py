@@ -2,7 +2,7 @@ import google.generativeai as genai
 import streamlit as st
 
 # Usar el modelo actual estable
-GEMINI_MODEL_NAME = "gemini-2.5-flash"
+GEMINI_MODEL_NAME = "gemini-flash-latest"
 
 @st.cache_resource
 def configure_gemini():
